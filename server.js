@@ -1,4 +1,3 @@
-// server.js
 "use strict";
 
 const path = require("path");
@@ -7,182 +6,115 @@ const express = require("express");
 const session = require("express-session");
 const sqlite3 = require("sqlite3").verbose();
 
-// ===== Config =====
-const NODE_ENV = process.env.NODE_ENV || "production";
-const PORT = process.env.PORT || 8080;
+// ===== Configuración =====
+const ENTORNO = process.env.NODE_ENV || "producción";
+const PUERTO = process.env.PORT || 8080;
 const HOST = "0.0.0.0";
-const ALLOW_USERNAME_ONLY =
+const SOLO_USUARIO =
   String(process.env.ALLOW_USERNAME_ONLY || "").toLowerCase() === "true";
 
-const PUBLIC_DIR = path.join(__dirname, "public");
-const DB_DIR = path.join(__dirname, "db");
-const DB_FILE = path.join(DB_DIR, "usuarios.db");
+const CARPETA_PUBLICA = path.join(__dirname, "public");
+const CARPETA_DB = path.join(__dirname, "db");
+const ARCHIVO_DB = path.join(CARPETA_DB, "usuarios.db");
 
-function ensureDir(p) { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); }
-function getDB() { ensureDir(DB_DIR); return new sqlite3.Database(DB_FILE); }
-
-// ===== Column discovery (lee tu esquema existente) =====
-let USER_COL = "username";   // se ajustará a tu BD
-let PASS_COL = "password";   // se ajustará a tu BD
-
-function quoteIdent(name) {
-  // Protege identificadores con backticks (SQLite los admite)
-  return "`" + String(name).replace(/`/g, "``") + "`";
+function asegurarDirectorio(p) {
+  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+}
+function obtenerDB() {
+  asegurarDirectorio(CARPETA_DB);
+  return new sqlite3.Database(ARCHIVO_DB);
 }
 
-function detectUserColumns(cb) {
-  const db = getDB();
-  db.all("PRAGMA table_info(usuarios);", (err, rows) => {
-    if (err) {
-      console.error("PRAGMA table_info error:", err);
-      db.close(); return cb && cb(err);
-    }
-    // Si no hay tabla, créala con esquema en inglés por defecto
-    if (!Array.isArray(rows) || rows.length === 0) {
-      db.run(
-        `CREATE TABLE IF NOT EXISTS usuarios (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          username TEXT UNIQUE NOT NULL,
-          password TEXT NOT NULL
-        )`,
-        (cerr) => {
-          if (cerr) { console.error("crear tabla usuarios error:", cerr); db.close(); return cb && cb(cerr); }
-          USER_COL = "username"; PASS_COL = "password";
-          db.close(); return cb && cb(null);
-        }
-      );
-      return;
-    }
-
-    const names = rows.map(r => (r && r.name ? String(r.name).trim() : "")).filter(Boolean);
-    const lower = names.map(n => n.toLowerCase());
-
-    // Posibles alias de columnas que solemos ver
-    const userCandidates = ["username", "nombre de usuario", "nombre_usuario", "usuario"];
-    const passCandidates = ["password", "contraseña", "contrasena", "clave"];
-
-    // Elegir la primera coincidencia que exista en la tabla
-    function pick(cands) {
-      for (const c of cands) {
-        const idx = lower.indexOf(c.toLowerCase());
-        if (idx >= 0) return names[idx];
-      }
-      return null;
-    }
-
-    const foundUser = pick(userCandidates);
-    const foundPass = pick(passCandidates);
-
-    if (!foundUser || !foundPass) {
-      console.warn("No se encontraron columnas de usuario/contraseña reconocibles. Usando esquema por defecto username/password.");
-      USER_COL = "username"; PASS_COL = "password";
-    } else {
-      USER_COL = foundUser;
-      PASS_COL = foundPass;
-    }
-
-    console.log(`Esquema detectado: USER_COL="${USER_COL}"  PASS_COL="${PASS_COL}"`);
-    db.close(); return cb && cb(null);
-  });
-}
-
-// ===== App =====
+// ===== Aplicación =====
 const app = express();
-
-// app.set("trust proxy", 1); // descomenta si sirves detrás de proxy HTTPS
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 app.use(
   session({
-    name: "sid",
-    secret: process.env.SESSION_SECRET || "dev-secret-change-me",
+    name: "sesion",
+    secret: process.env.SESSION_SECRET || "secreto-desarrollo",
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: !!process.env.SESSION_SECURE, // ponlo a true si hay HTTPS tras proxy
-      maxAge: 1000 * 60 * 60 * 8, // 8h
+      secure: false,
+      maxAge: 1000 * 60 * 60 * 8, // 8 horas
     },
   })
 );
 
-// Páginas privadas
+// Páginas protegidas
 const paginasPrivadas = new Set(["/inicio.html", "/historial.html"]);
 app.use((req, res, next) => {
   try {
     if (req.method === "GET" && paginasPrivadas.has(req.path)) {
-      if (req.session && req.session.userId) return next();
+      if (req.session && req.session.idUsuario) return next();
       return res.redirect(302, "/login.html");
     }
     next();
   } catch (e) {
-    console.error("middleware privado error:", e);
-    res.status(500).type("text").send("Error de servidor.");
+    console.error("Error en middleware privado:", e);
+    res.status(500).type("text").send("Error interno del servidor.");
   }
 });
 
-// Estáticos
-app.use(express.static(PUBLIC_DIR, { fallthrough: true }));
+// Servir archivos estáticos
+app.use(express.static(CARPETA_PUBLICA, { fallthrough: true }));
 
-// ===== API: Login (soporta solo-usuario si ALLOW_USERNAME_ONLY=true) =====
+// ===== Ruta: Inicio de sesión =====
 app.post("/login", (req, res) => {
   try {
     const b = req.body || {};
-    const username = (b.username ?? b.usuario ?? b.user ?? "").toString().trim();
-    const password = (b.password ?? b.pass ?? b.contrasena ?? b["contraseña"] ?? "").toString();
+    const nombreUsuario = (b.username ?? b.usuario ?? b["nombre de usuario"] ?? "").toString().trim();
+    const contrasena = (b.password ?? b.pass ?? b["contraseña"] ?? b.contrasena ?? "").toString();
 
-    if (!username) {
-      return res.status(400).json({ error: "campos_faltantes", detalle: "username requerido" });
+    if (!nombreUsuario) {
+      return res.status(400).json({ error: "campos_faltantes", detalle: "nombre de usuario requerido" });
     }
-    if (!ALLOW_USERNAME_ONLY && !password) {
-      return res.status(400).json({ error: "campos_faltantes", detalle: "password requerido" });
+    if (!SOLO_USUARIO && !contrasena) {
+      return res.status(400).json({ error: "campos_faltantes", detalle: "contraseña requerida" });
     }
 
-    const db = getDB();
-    const u = quoteIdent(USER_COL);
-    const p = quoteIdent(PASS_COL);
+    const db = obtenerDB();
+    const sql = "SELECT id, `nombre de usuario` AS nombreUsuario, `contraseña` AS contrasena FROM usuarios WHERE `nombre de usuario` = ?";
 
-    // Leemos siempre devolviendo alias estándar (username/password) al JS
-    const sql = `SELECT id, ${u} AS username, ${p} AS password FROM usuarios WHERE ${u} = ?`;
-
-    db.get(sql, [username], (err2, row) => {
-      if (err2) {
-        console.error("select usuario error:", err2);
+    db.get(sql, [nombreUsuario], (err, fila) => {
+      if (err) {
+        console.error("Error al seleccionar usuario:", err);
         db.close();
         return res.status(500).json({ error: "error_servidor" });
-        }
-      if (!row) {
+      }
+      if (!fila) {
         db.close();
         return res.status(401).json({ error: "usuario_no_encontrado" });
       }
 
-      const stored = String(row.password ?? "");
+      const guardada = String(fila.contrasena ?? "");
 
-      // Si ALLOW_USERNAME_ONLY=true y NO se envió password -> pasa.
-      // En caso contrario, compara password.
-      if (!(ALLOW_USERNAME_ONLY && !password)) {
-        if (stored !== String(password)) {
+      // Si solo usuario activado, no se requiere contraseña
+      if (!(SOLO_USUARIO && !contrasena)) {
+        if (guardada !== String(contrasena)) {
           db.close();
           return res.status(401).json({ error: "credenciales_invalidas" });
         }
       }
 
-      req.session.userId = row.id;
-      req.session.username = row.username;
+      req.session.idUsuario = fila.id;
+      req.session.nombreUsuario = fila.nombreUsuario;
       db.close();
 
       return res.redirect("/inicio.html");
     });
   } catch (err) {
-    console.error("login error:", err);
+    console.error("Error en login:", err);
     return res.status(500).json({ error: "error_servidor" });
   }
 });
 
-// ===== API: Logout / WhoAmI =====
+// ===== Cierre de sesión =====
 app.post("/logout", (req, res) => {
   try {
     if (req.session) {
@@ -191,29 +123,30 @@ app.post("/logout", (req, res) => {
       res.json({ ok: true });
     }
   } catch (err) {
-    console.error("logout error:", err);
+    console.error("Error en logout:", err);
     res.status(500).json({ error: "error_servidor" });
   }
 });
 
-app.get("/whoami", (req, res) => {
-  if (req.session && req.session.userId) {
+// ===== Comprobar sesión =====
+app.get("/quiensoy", (req, res) => {
+  if (req.session && req.session.idUsuario) {
     return res.json({
-      authenticated: true,
-      id: req.session.userId,
-      username: req.session.username,
+      autenticado: true,
+      id: req.session.idUsuario,
+      nombreUsuario: req.session.nombreUsuario,
     });
   }
-  res.json({ authenticated: false });
+  res.json({ autenticado: false });
 });
 
-// ===== Healthchecks =====
+// ===== Healthcheck =====
 app.get("/salud", (_req, res) => res.status(200).type("text").send("ok"));
 app.get("/health", (_req, res) => res.status(200).type("text").send("ok"));
 
 // ===== Rutas de conveniencia =====
 app.get("/", (req, res) => {
-  if (req.session && req.session.userId) return res.redirect("/inicio.html");
+  if (req.session && req.session.idUsuario) return res.redirect("/inicio.html");
   return res.redirect("/login.html");
 });
 app.get("/inicio", (_req, res) => res.redirect(302, "/inicio.html"));
@@ -223,11 +156,8 @@ app.get("/historial", (_req, res) => res.redirect(302, "/historial.html"));
 app.use((_, res) => res.status(404).type("text").send("Recurso no encontrado."));
 
 // ===== Arranque =====
-detectUserColumns((err) => {
-  if (err) process.exit(1);
-  app.listen(PORT, HOST, () => {
-    console.log(
-      `Servidor en http://${HOST}:${PORT} (env:${NODE_ENV}) username-only=${ALLOW_USERNAME_ONLY} | USER_COL=${USER_COL} PASS_COL=${PASS_COL}`
-    );
-  });
+app.listen(PUERTO, HOST, () => {
+  console.log(
+    `Servidor en http://${HOST}:${PUERTO} (entorno:${ENTORNO}) solo-usuario=${SOLO_USUARIO}`
+  );
 });
