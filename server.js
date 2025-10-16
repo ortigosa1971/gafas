@@ -26,42 +26,122 @@ function getDB() {
   return new sqlite3.Database(DB_FILE);
 }
 
-// ===== Init DB (tabla + seed admin) =====
+// ===== Init DB (tabla + migración si columnas están en español) =====
 function initDB(cb) {
   const db = getDB();
-  db.serialize(() => {
-    db.run(
-      `CREATE TABLE IF NOT EXISTS usuarios (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL
-      )`,
-      (err) => {
-        if (err) {
-          console.error("DB: error creando tabla usuarios:", err);
-          db.close();
-          return cb && cb(err);
-        }
-        // Usuario admin con contraseña vacía (útil si ALLOW_USERNAME_ONLY=true)
-        db.run(
-          "INSERT OR IGNORE INTO usuarios (username, password) VALUES (?, ?)",
-          ["admin", ""],
-          (seedErr) => {
-            if (seedErr) console.error("DB: seed admin error:", seedErr);
+
+  db.all(`PRAGMA table_info(usuarios);`, (infoErr, rows) => {
+    const noTable = infoErr && /no such table/i.test(String(infoErr));
+    const cols = Array.isArray(rows) ? rows.map((r) => r.name) : [];
+
+    const hasUsername = cols.includes("username");
+    const hasPassword = cols.includes("password");
+    const hasNombreUsuario =
+      cols.includes("nombre de usuario") || cols.includes("nombre_usuario");
+    const hasContrasena =
+      cols.includes("contraseña") || cols.includes("contrasena");
+
+    const createCorrect = () => {
+      db.run(
+        `CREATE TABLE IF NOT EXISTS usuarios (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          username TEXT UNIQUE NOT NULL,
+          password TEXT NOT NULL
+        )`,
+        (err) => {
+          if (err) {
+            console.error("DB: error creando tabla usuarios:", err);
             db.close();
-            cb && cb(null);
+            return cb && cb(err);
+          }
+          // seed admin (password vacía; útil si ALLOW_USERNAME_ONLY=true)
+          db.run(
+            "INSERT OR IGNORE INTO usuarios (username, password) VALUES (?, ?)",
+            ["admin", ""],
+            (seedErr) => {
+              if (seedErr) console.error("DB: seed admin error:", seedErr);
+              db.close();
+              return cb && cb(null);
+            }
+          );
+        }
+      );
+    };
+
+    // Sin tabla o ya correcta → crear/sembrar y salir
+    if (noTable || (hasUsername && hasPassword && !hasNombreUsuario && !hasContrasena)) {
+      return createCorrect();
+    }
+
+    // Detectado esquema en español → migrar
+    if ((hasNombreUsuario || hasContrasena) && !(hasUsername && hasPassword)) {
+      console.warn("DB: detectado esquema en español; migrando a username/password…");
+
+      db.serialize(() => {
+        db.run(
+          `CREATE TABLE IF NOT EXISTS usuarios_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+          )`
+        );
+
+        const userCol = hasNombreUsuario
+          ? (cols.includes("nombre_usuario") ? "nombre_usuario" : "`nombre de usuario`")
+          : "username";
+        const passCol = hasContrasena
+          ? (cols.includes("contrasena") ? "contrasena" : "contraseña")
+          : "password";
+
+        db.run(
+          `INSERT OR IGNORE INTO usuarios_new (id, username, password)
+           SELECT id, ${userCol}, ${passCol} FROM usuarios`,
+          (copyErr) => {
+            if (copyErr) {
+              console.error("DB: error copiando datos a usuarios_new:", copyErr);
+              return db.run(`ALTER TABLE usuarios RENAME TO usuarios_obsoleta;`, () => {
+                createCorrect();
+              });
+            }
+
+            db.run(`DROP TABLE usuarios;`, (dropErr) => {
+              if (dropErr) console.error("DB: error drop usuarios:", dropErr);
+              db.run(
+                `ALTER TABLE usuarios_new RENAME TO usuarios;`,
+                (renErr) => {
+                  if (renErr) {
+                    console.error("DB: error rename usuarios_new -> usuarios:", renErr);
+                    db.close();
+                    return cb && cb(renErr);
+                  }
+                  console.log("DB: migración completada a username/password.");
+                  db.run(
+                    "INSERT OR IGNORE INTO usuarios (username, password) VALUES (?, ?)",
+                    ["admin", ""],
+                    (seedErr) => {
+                      if (seedErr) console.error("DB: seed admin error:", seedErr);
+                      db.close();
+                      return cb && cb(null);
+                    }
+                  );
+                }
+              );
+            });
           }
         );
-      }
-    );
+      });
+      return;
+    }
+
+    // Cualquier otro caso raro → garantizar estructura correcta
+    createCorrect();
   });
 }
 
 // ===== App =====
 const app = express();
 
-// (Opcional) Si usas proxy/https en plataforma:
-// app.set("trust proxy", 1);
+// app.set("trust proxy", 1); // descomenta si sirves detrás de proxy HTTPS
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -75,14 +155,13 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      // cambia a true si sirves detrás de proxy HTTPS configurado:
-      secure: !!process.env.SESSION_SECURE,
+      secure: !!process.env.SESSION_SECURE, // ponlo a true si hay HTTPS tras proxy
       maxAge: 1000 * 60 * 60 * 8, // 8h
     },
   })
 );
 
-// Páginas privadas que requieren sesión (ficheros estáticos)
+// Páginas privadas que requieren sesión
 const paginasPrivadas = new Set(["/inicio.html", "/historial.html"]);
 app.use((req, res, next) => {
   try {
@@ -97,10 +176,10 @@ app.use((req, res, next) => {
   }
 });
 
-// Servir estáticos
+// Estáticos
 app.use(express.static(PUBLIC_DIR, { fallthrough: true }));
 
-// ===== API: Login =====
+// ===== API: Login (usuario solo si ALLOW_USERNAME_ONLY=true) =====
 app.post("/login", (req, res) => {
   try {
     const b = req.body || {};
@@ -131,9 +210,8 @@ app.post("/login", (req, res) => {
 
         const stored = String(row.password ?? "");
 
-        // Autenticación:
-        // - Si ALLOW_USERNAME_ONLY=true y NO se envió password -> pasa.
-        // - Si se envió password (o ALLOW_USERNAME_ONLY=false) -> compara.
+        // Si ALLOW_USERNAME_ONLY=true y NO se envió password -> pasa.
+        // En caso contrario, compara password.
         if (!(ALLOW_USERNAME_ONLY && !password)) {
           if (stored !== String(password)) {
             db.close();
@@ -205,4 +283,3 @@ initDB((err) => {
     );
   });
 });
-
