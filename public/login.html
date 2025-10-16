@@ -1,82 +1,72 @@
-@@
- <!doctype html>
- <html lang="es">
- <head>
-   <meta charset="utf-8" />
-   <meta name="viewport" content="width=device-width, initial-scale=1" />
-   <title>Iniciar sesión</title>
-   <style>
-     body {
-       background:#0d3b86;
-       display:flex;
-       align-items:center;
-       justify-content:center;
-       height:100vh;
-       margin:0;
-       font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;
-     }
-     .card {
-       width:360px;
-       background:#fff;
-       border-radius:12px;
-       box-shadow:0 10px 30px rgba(0,0,0,.2);
-       padding:24px;
-     }
-     h1 {margin:0 0 16px;text-align:center}
-     label {display:block;margin-bottom:8px;color:#333}
-     input {
-       width:100%;
-       padding:12px;
-       border:1px solid #d0d5dd;
-       border-radius:8px;
-       font-size:16px;
-     }
-     button {
-       width:100%;
-       margin-top:14px;
-       padding:12px;
-       border:0;
-       border-radius:8px;
-       background:#1ea7fd;
-       color:#fff;
-       font-weight:600;
-       cursor:pointer;
-     }
-     .msg {
-       margin-top:12px;
-       padding:10px;
-       border-radius:8px;
-       display:none;
-     }
-     .err {background:#ffe9e9;color:#a40000;border:1px solid #ffc6c6}
-     .ok {background:#e9fff0;color:#008f2d;border:1px solid #afffc2}
-   </style>
- </head>
- <body>
--  <div class="card">
--    <h1>Iniciar sesión</h1>
--    <form method="POST" action="/login">
--      <label for="usuario">Usuario:</label>
--      <input id="usuario" name="usuario" required />
--
--      <label for="password">Contraseña:</label>
--      <input id="password" name="password" type="password" required autocomplete="current-password" />
--
--      <button type="submit">Entrar</button>
--    </form>
--    <div id="msg" class="msg"></div>
--  </div>
-+  <div class="card">
-+    <h1>Iniciar sesión</h1>
-+    <form method="POST" action="/login" style="display:flex;flex-direction:column;gap:12px">
-+      <label for="usuario" style="font-weight:bold">Usuario:</label>
-+      <input id="usuario" name="usuario" required autofocus autocomplete="username" />
-+      <button type="submit" style="padding:12px;font-weight:bold">Entrar</button>
-+    </form>
-+    <p style="font-size:0.9rem;color:#555;margin-top:10px;text-align:center">
-+      (Solo se requiere el nombre de usuario)
-+    </p>
-+  </div>
- </body>
- </html>
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Iniciar sesión</title>
+  <style>
+    body {
+      background: linear-gradient(135deg, #0057b7, #009fe3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      font-family: system-ui, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    .card {
+      width: 360px;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+      padding: 24px;
+    }
+    h1 {
+      margin: 0 0 16px;
+      text-align: center;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: #333;
+      font-weight: bold;
+    }
+    input {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #d0d5dd;
+      border-radius: 8px;
+      font-size: 16px;
+    }
+    button {
+      width: 100%;
+      margin-top: 14px;
+      padding: 12px;
+      border: 0;
+      border-radius: 8px;
+      background: #1ea7fd;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    p.note {
+      font-size: 0.9rem;
+      color: #555;
+      text-align: center;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Iniciar sesión</h1>
+    <form method="POST" action="/login" style="display:flex;flex-direction:column;gap:12px">
+      <label for="usuario">Usuario:</label>
+      <input id="usuario" name="usuario" required autofocus autocomplete="username" />
+      <button type="submit">Entrar</button>
+    </form>
+    <p class="note">(Solo se requiere el nombre de usuario)</p>
+  </div>
+</body>
+</html>
 
