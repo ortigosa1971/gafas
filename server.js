@@ -8,7 +8,7 @@ const session = require("express-session");
 const sqlite3 = require("sqlite3").verbose();
 
 // ===== Config =====
-const NODE_ENV = process.env.NODE_ENV || "development";
+const NODE_ENV = process.env.NODE_ENV || "production";
 const PORT = process.env.PORT || 8080;
 const HOST = "0.0.0.0";
 const ALLOW_USERNAME_ONLY =
@@ -18,123 +18,71 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const DB_DIR = path.join(__dirname, "db");
 const DB_FILE = path.join(DB_DIR, "usuarios.db");
 
-function ensureDir(p) {
-  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
-}
-function getDB() {
-  ensureDir(DB_DIR);
-  return new sqlite3.Database(DB_FILE);
+function ensureDir(p) { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); }
+function getDB() { ensureDir(DB_DIR); return new sqlite3.Database(DB_FILE); }
+
+// ===== Column discovery (lee tu esquema existente) =====
+let USER_COL = "username";   // se ajustará a tu BD
+let PASS_COL = "password";   // se ajustará a tu BD
+
+function quoteIdent(name) {
+  // Protege identificadores con backticks (SQLite los admite)
+  return "`" + String(name).replace(/`/g, "``") + "`";
 }
 
-// ===== Init DB (tabla + migración si columnas están en español) =====
-function initDB(cb) {
+function detectUserColumns(cb) {
   const db = getDB();
-
-  db.all(`PRAGMA table_info(usuarios);`, (infoErr, rows) => {
-    const noTable = infoErr && /no such table/i.test(String(infoErr));
-    const cols = Array.isArray(rows) ? rows.map((r) => r.name) : [];
-
-    const hasUsername = cols.includes("username");
-    const hasPassword = cols.includes("password");
-    const hasNombreUsuario =
-      cols.includes("nombre de usuario") || cols.includes("nombre_usuario");
-    const hasContrasena =
-      cols.includes("contraseña") || cols.includes("contrasena");
-
-    const createCorrect = () => {
+  db.all("PRAGMA table_info(usuarios);", (err, rows) => {
+    if (err) {
+      console.error("PRAGMA table_info error:", err);
+      db.close(); return cb && cb(err);
+    }
+    // Si no hay tabla, créala con esquema en inglés por defecto
+    if (!Array.isArray(rows) || rows.length === 0) {
       db.run(
         `CREATE TABLE IF NOT EXISTS usuarios (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           username TEXT UNIQUE NOT NULL,
           password TEXT NOT NULL
         )`,
-        (err) => {
-          if (err) {
-            console.error("DB: error creando tabla usuarios:", err);
-            db.close();
-            return cb && cb(err);
-          }
-          // seed admin (password vacía; útil si ALLOW_USERNAME_ONLY=true)
-          db.run(
-            "INSERT OR IGNORE INTO usuarios (username, password) VALUES (?, ?)",
-            ["admin", ""],
-            (seedErr) => {
-              if (seedErr) console.error("DB: seed admin error:", seedErr);
-              db.close();
-              return cb && cb(null);
-            }
-          );
+        (cerr) => {
+          if (cerr) { console.error("crear tabla usuarios error:", cerr); db.close(); return cb && cb(cerr); }
+          USER_COL = "username"; PASS_COL = "password";
+          db.close(); return cb && cb(null);
         }
       );
-    };
-
-    // Sin tabla o ya correcta → crear/sembrar y salir
-    if (noTable || (hasUsername && hasPassword && !hasNombreUsuario && !hasContrasena)) {
-      return createCorrect();
-    }
-
-    // Detectado esquema en español → migrar
-    if ((hasNombreUsuario || hasContrasena) && !(hasUsername && hasPassword)) {
-      console.warn("DB: detectado esquema en español; migrando a username/password…");
-
-      db.serialize(() => {
-        db.run(
-          `CREATE TABLE IF NOT EXISTS usuarios_new (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-          )`
-        );
-
-        const userCol = hasNombreUsuario
-          ? (cols.includes("nombre_usuario") ? "nombre_usuario" : "`nombre de usuario`")
-          : "username";
-        const passCol = hasContrasena
-          ? (cols.includes("contrasena") ? "contrasena" : "contraseña")
-          : "password";
-
-        db.run(
-          `INSERT OR IGNORE INTO usuarios_new (id, username, password)
-           SELECT id, ${userCol}, ${passCol} FROM usuarios`,
-          (copyErr) => {
-            if (copyErr) {
-              console.error("DB: error copiando datos a usuarios_new:", copyErr);
-              return db.run(`ALTER TABLE usuarios RENAME TO usuarios_obsoleta;`, () => {
-                createCorrect();
-              });
-            }
-
-            db.run(`DROP TABLE usuarios;`, (dropErr) => {
-              if (dropErr) console.error("DB: error drop usuarios:", dropErr);
-              db.run(
-                `ALTER TABLE usuarios_new RENAME TO usuarios;`,
-                (renErr) => {
-                  if (renErr) {
-                    console.error("DB: error rename usuarios_new -> usuarios:", renErr);
-                    db.close();
-                    return cb && cb(renErr);
-                  }
-                  console.log("DB: migración completada a username/password.");
-                  db.run(
-                    "INSERT OR IGNORE INTO usuarios (username, password) VALUES (?, ?)",
-                    ["admin", ""],
-                    (seedErr) => {
-                      if (seedErr) console.error("DB: seed admin error:", seedErr);
-                      db.close();
-                      return cb && cb(null);
-                    }
-                  );
-                }
-              );
-            });
-          }
-        );
-      });
       return;
     }
 
-    // Cualquier otro caso raro → garantizar estructura correcta
-    createCorrect();
+    const names = rows.map(r => (r && r.name ? String(r.name).trim() : "")).filter(Boolean);
+    const lower = names.map(n => n.toLowerCase());
+
+    // Posibles alias de columnas que solemos ver
+    const userCandidates = ["username", "nombre de usuario", "nombre_usuario", "usuario"];
+    const passCandidates = ["password", "contraseña", "contrasena", "clave"];
+
+    // Elegir la primera coincidencia que exista en la tabla
+    function pick(cands) {
+      for (const c of cands) {
+        const idx = lower.indexOf(c.toLowerCase());
+        if (idx >= 0) return names[idx];
+      }
+      return null;
+    }
+
+    const foundUser = pick(userCandidates);
+    const foundPass = pick(passCandidates);
+
+    if (!foundUser || !foundPass) {
+      console.warn("No se encontraron columnas de usuario/contraseña reconocibles. Usando esquema por defecto username/password.");
+      USER_COL = "username"; PASS_COL = "password";
+    } else {
+      USER_COL = foundUser;
+      PASS_COL = foundPass;
+    }
+
+    console.log(`Esquema detectado: USER_COL="${USER_COL}"  PASS_COL="${PASS_COL}"`);
+    db.close(); return cb && cb(null);
   });
 }
 
@@ -161,7 +109,7 @@ app.use(
   })
 );
 
-// Páginas privadas que requieren sesión
+// Páginas privadas
 const paginasPrivadas = new Set(["/inicio.html", "/historial.html"]);
 app.use((req, res, next) => {
   try {
@@ -179,7 +127,7 @@ app.use((req, res, next) => {
 // Estáticos
 app.use(express.static(PUBLIC_DIR, { fallthrough: true }));
 
-// ===== API: Login (usuario solo si ALLOW_USERNAME_ONLY=true) =====
+// ===== API: Login (soporta solo-usuario si ALLOW_USERNAME_ONLY=true) =====
 app.post("/login", (req, res) => {
   try {
     const b = req.body || {};
@@ -194,38 +142,40 @@ app.post("/login", (req, res) => {
     }
 
     const db = getDB();
-    db.get(
-      "SELECT id, username, password FROM usuarios WHERE username = ?",
-      [username],
-      (err2, row) => {
-        if (err2) {
-          console.error("select usuario error:", err2);
-          db.close();
-          return res.status(500).json({ error: "error_servidor" });
-        }
-        if (!row) {
-          db.close();
-          return res.status(401).json({ error: "usuario_no_encontrado" });
-        }
+    const u = quoteIdent(USER_COL);
+    const p = quoteIdent(PASS_COL);
 
-        const stored = String(row.password ?? "");
+    // Leemos siempre devolviendo alias estándar (username/password) al JS
+    const sql = `SELECT id, ${u} AS username, ${p} AS password FROM usuarios WHERE ${u} = ?`;
 
-        // Si ALLOW_USERNAME_ONLY=true y NO se envió password -> pasa.
-        // En caso contrario, compara password.
-        if (!(ALLOW_USERNAME_ONLY && !password)) {
-          if (stored !== String(password)) {
-            db.close();
-            return res.status(401).json({ error: "credenciales_invalidas" });
-          }
-        }
-
-        req.session.userId = row.id;
-        req.session.username = row.username;
+    db.get(sql, [username], (err2, row) => {
+      if (err2) {
+        console.error("select usuario error:", err2);
         db.close();
-
-        return res.redirect("/inicio.html");
+        return res.status(500).json({ error: "error_servidor" });
+        }
+      if (!row) {
+        db.close();
+        return res.status(401).json({ error: "usuario_no_encontrado" });
       }
-    );
+
+      const stored = String(row.password ?? "");
+
+      // Si ALLOW_USERNAME_ONLY=true y NO se envió password -> pasa.
+      // En caso contrario, compara password.
+      if (!(ALLOW_USERNAME_ONLY && !password)) {
+        if (stored !== String(password)) {
+          db.close();
+          return res.status(401).json({ error: "credenciales_invalidas" });
+        }
+      }
+
+      req.session.userId = row.id;
+      req.session.username = row.username;
+      db.close();
+
+      return res.redirect("/inicio.html");
+    });
   } catch (err) {
     console.error("login error:", err);
     return res.status(500).json({ error: "error_servidor" });
@@ -270,16 +220,14 @@ app.get("/inicio", (_req, res) => res.redirect(302, "/inicio.html"));
 app.get("/historial", (_req, res) => res.redirect(302, "/historial.html"));
 
 // ===== 404 =====
-app.use((req, res) => {
-  res.status(404).type("text").send("Recurso no encontrado.");
-});
+app.use((_, res) => res.status(404).type("text").send("Recurso no encontrado."));
 
-// ===== Start =====
-initDB((err) => {
+// ===== Arranque =====
+detectUserColumns((err) => {
   if (err) process.exit(1);
   app.listen(PORT, HOST, () => {
     console.log(
-      `Servidor en http://${HOST}:${PORT} (env:${NODE_ENV}) username-only=${ALLOW_USERNAME_ONLY}`
+      `Servidor en http://${HOST}:${PORT} (env:${NODE_ENV}) username-only=${ALLOW_USERNAME_ONLY} | USER_COL=${USER_COL} PASS_COL=${PASS_COL}`
     );
   });
 });
