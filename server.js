@@ -1,7 +1,4 @@
 // server.js
-// Servidor Express con sesiones y control de acceso a páginas privadas.
-// Incluye healthcheck (/salud), alias de rutas y redirección tras login.
-
 "use strict";
 
 const path = require("path");
@@ -10,35 +7,29 @@ const express = require("express");
 const session = require("express-session");
 const sqlite3 = require("sqlite3").verbose();
 
-// ===== Configuración básica =====
+// ===== Configuración =====
 const NODE_ENV = process.env.NODE_ENV || "desarrollo";
 const PORT = process.env.PORT || 8080;
 const HOST = "0.0.0.0";
+const ALLOW_USERNAME_ONLY = String(process.env.ALLOW_USERNAME_ONLY || "").toLowerCase() === "true";
 
-// Carpeta pública
 const PUBLIC_DIR = path.join(__dirname, "public");
-
-// DB: archivo y helper
 const DB_DIR = path.join(__dirname, "db");
 const DB_FILE = path.join(DB_DIR, "usuarios.db");
 
 function ensureDbDir() {
   if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 }
-
 function getDB() {
   ensureDbDir();
   return new sqlite3.Database(DB_FILE);
 }
 
-// ===== App =====
 const app = express();
 
-// Body parsers
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// Sesiones (MemoryStore para dev; en prod usar store persistente)
 app.use(
   session({
     name: "sid",
@@ -48,57 +39,47 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: !!process.env.SESSION_SECURE, // ponlo a true si vas a servir sobre HTTPS con proxy que reescriba secure
-      maxAge: 1000 * 60 * 60 * 8, // 8 horas
+      secure: !!process.env.SESSION_SECURE,
+      maxAge: 1000 * 60 * 60 * 8,
     },
   })
 );
 
-// ===== Utilidades =====
-
-// Conjunto de páginas privadas que requieren sesión (sirves estáticos, pero con control)
+// Páginas privadas
 const paginasPrivadas = new Set(["/inicio.html", "/historial.html"]);
-
-// Middleware: protege las páginas privadas servidas como archivos estáticos
 app.use((req, res, next) => {
   try {
-    // Solo aplica a GET a rutas exactas de páginas privadas
     if (req.method === "GET" && paginasPrivadas.has(req.path)) {
-      if (req.session && req.session.userId) {
-        return next();
-      }
-      // Sin sesión → a login
+      if (req.session && req.session.userId) return next();
       return res.redirect(302, "/login.html");
     }
-    return next();
-  } catch (err) {
-    console.error("middleware privado error:", err);
-    return res.status(500).type("text").send("Error de servidor.");
+    next();
+  } catch (e) {
+    console.error("middleware privado error:", e);
+    res.status(500).type("text").send("Error de servidor.");
   }
 });
 
-// Sirve estáticos
 app.use(express.static(PUBLIC_DIR, { fallthrough: true }));
 
-// ===== Rutas API =====
-
-// Login: acepta username/usuario/user y password/pass/contraseña/contrasena
+// ===== Login con modo "solo usuario" opcional =====
 app.post("/login", (req, res) => {
   try {
     const b = req.body || {};
-    const username =
-      (b.username ?? b.usuario ?? b.user ?? "").toString().trim();
-    const password =
-      (b.password ?? b.pass ?? b.contrasena ?? b["contraseña"] ?? "")
-        .toString();
+    const username = (b.username ?? b.usuario ?? b.user ?? "").toString().trim();
+    const password = (b.password ?? b.pass ?? b.contrasena ?? b["contraseña"] ?? "").toString();
 
-    if (!username || !password) {
-      return res.status(400).json({ error: "campos_faltantes" });
+    // Si NO hay username, error siempre
+    if (!username) {
+      return res.status(400).json({ error: "campos_faltantes", detalle: "username requerido" });
+    }
+    // Si el modo "solo usuario" NO está permitido y no hay password -> error
+    if (!ALLOW_USERNAME_ONLY && !password) {
+      return res.status(400).json({ error: "campos_faltantes", detalle: "password requerido" });
     }
 
     const db = getDB();
 
-    // Nos aseguramos de que exista la tabla (por si el entorno arranca "limpio")
     db.run(
       `CREATE TABLE IF NOT EXISTS usuarios (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +93,6 @@ app.post("/login", (req, res) => {
           return res.status(500).json({ error: "error_servidor" });
         }
 
-        // Busca usuario
         db.get(
           "SELECT id, username, password FROM usuarios WHERE username = ?",
           [username],
@@ -127,18 +107,24 @@ app.post("/login", (req, res) => {
               return res.status(401).json({ error: "usuario_no_encontrado" });
             }
 
-            // Comparación simple (texto plano). En producción, usa hash (bcrypt).
-            if (String(row.password) !== String(password)) {
-              db.close();
-              return res.status(401).json({ error: "credenciales_invalidas" });
+            const stored = String(row.password ?? "");
+
+            // Lógica de autenticación:
+            // - Si ALLOW_USERNAME_ONLY=true y no enviaron password -> pasa (solo por usuario).
+            // - Si ALLOW_USERNAME_ONLY=true y enviaron password -> compara como siempre.
+            // - Si ALLOW_USERNAME_ONLY=false -> siempre compara password.
+            if (!(ALLOW_USERNAME_ONLY && !password)) {
+              if (stored !== String(password)) {
+                db.close();
+                return res.status(401).json({ error: "credenciales_invalidas" });
+              }
             }
 
-            // OK → sesión y redirige a inicio
+            // Sesión OK
             req.session.userId = row.id;
             req.session.username = row.username;
             db.close();
 
-            // Importante: redirigimos para que no se quede en /login (evita 404 posteriores)
             return res.redirect("/inicio.html");
           }
         );
@@ -159,49 +145,35 @@ app.post("/logout", (req, res) => {
     }
   } catch (err) {
     console.error("logout error:", err);
-    return res.status(500).json({ error: "error_servidor" });
+    res.status(500).json({ error: "error_servidor" });
   }
 });
 
-// Quién soy (útil para front)
 app.get("/whoami", (req, res) => {
   if (req.session && req.session.userId) {
-    return res.json({
-      authenticated: true,
-      id: req.session.userId,
-      username: req.session.username,
-    });
+    return res.json({ authenticated: true, id: req.session.userId, username: req.session.username });
   }
   res.json({ authenticated: false });
 });
 
-// ===== Healthcheck (para plataforma) =====
-app.get("/salud", (_req, res) => {
-  res.status(200).type("text").send("ok");
-});
-app.get("/health", (_req, res) => {
-  res.status(200).type("text").send("ok");
-});
+// Healthcheck
+app.get("/salud", (_req, res) => res.status(200).type("text").send("ok"));
+app.get("/health", (_req, res) => res.status(200).type("text").send("ok"));
 
-// ===== Rutas de conveniencia (después de APIs, antes del 404) =====
+// Rutas de conveniencia
 app.get("/", (req, res) => {
-  if (req.session && req.session.userId) {
-    return res.redirect("/inicio.html");
-  }
+  if (req.session && req.session.userId) return res.redirect("/inicio.html");
   return res.redirect("/login.html");
 });
-
-// Alias sin extensión
 app.get("/inicio", (_req, res) => res.redirect(302, "/inicio.html"));
 app.get("/historial", (_req, res) => res.redirect(302, "/historial.html"));
 
-// ===== 404 genérico (debe ir al final) =====
+// 404
 app.use((req, res) => {
   res.status(404).type("text").send("Recurso no encontrado.");
 });
 
-// ===== Arranque =====
 app.listen(PORT, HOST, () => {
-  console.log(`Servidor en http://${HOST}:${PORT} (env:${NODE_ENV})`);
+  console.log(`Servidor en http://${HOST}:${PORT} (env:${NODE_ENV})  username-only=${ALLOW_USERNAME_ONLY}`);
 });
 
